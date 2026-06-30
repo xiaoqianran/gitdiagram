@@ -9,16 +9,20 @@ import {
 } from "~/components/ui/tooltip";
 
 interface CopyButtonProps {
-  onClick: () => void;
+  onClick: () => void | Promise<void>;
 }
 
 export function CopyButton({ onClick }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
 
-  const handleClick = () => {
-    onClick();
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000); // Reset after 2 seconds
+  const handleClick = async () => {
+    try {
+      await onClick();
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
   };
 
   return (
