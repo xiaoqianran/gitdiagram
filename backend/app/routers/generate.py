@@ -43,7 +43,7 @@ from app.services.model_config import (
     get_provider_label,
     should_use_exact_input_token_count,
 )
-from app.services.openai_service import OpenAIService
+from app.services.openai_service import OpenAIService, StructuredOutputParseError
 from app.services.pricing import (
     EXPLANATION_MAX_OUTPUT_TOKENS,
     GRAPH_MAX_OUTPUT_TOKENS,
@@ -779,23 +779,59 @@ async def generate_stream(request: Request):
                     }
                 )
 
-                graph, raw_output, usage = await openai_service.generate_structured_output(
-                    provider=provider,
-                    model=model,
-                    system_prompt=SYSTEM_GRAPH_PROMPT,
-                    data={
-                        "explanation": explanation,
-                        "file_tree": github_data.file_tree,
-                        "repo_owner": parsed.username,
-                        "repo_name": parsed.repo,
-                        "previous_graph": previous_graph,
-                        "validation_feedback": validation_feedback,
-                    },
-                    text_format=DiagramGraph,
-                    api_key=parsed.api_key,
-                    reasoning_effort="low",
-                    max_output_tokens=GRAPH_MAX_OUTPUT_TOKENS,
-                )
+                try:
+                    graph, raw_output, usage = await openai_service.generate_structured_output(
+                        provider=provider,
+                        model=model,
+                        system_prompt=SYSTEM_GRAPH_PROMPT,
+                        data={
+                            "explanation": explanation,
+                            "file_tree": github_data.file_tree,
+                            "repo_owner": parsed.username,
+                            "repo_name": parsed.repo,
+                            "previous_graph": previous_graph,
+                            "validation_feedback": validation_feedback,
+                        },
+                        text_format=DiagramGraph,
+                        api_key=parsed.api_key,
+                        reasoning_effort="low",
+                        max_output_tokens=GRAPH_MAX_OUTPUT_TOKENS,
+                    )
+                except (StructuredOutputParseError, ValidationError) as exc:
+                    raw_output = getattr(exc, "raw_text", "") or str(exc)
+                    validation_feedback = (
+                        "Your previous response was not valid JSON for the diagram graph. "
+                        "Return ONLY a JSON object with groups, nodes, and edges. "
+                        "Do not include prose, markdown fences, or commentary. "
+                        f"Parser error: {exc}"
+                    )
+                    previous_graph = raw_output or previous_graph
+                    audit["graphAttempts"] = [
+                        *audit.get("graphAttempts", []),
+                        {
+                            "attempt": attempt,
+                            "rawOutput": raw_output,
+                            "graph": None,
+                            "validationFeedback": validation_feedback,
+                            "status": "failed",
+                            "createdAt": _now_iso(),
+                        },
+                    ]
+                    audit = _timeline(
+                        audit,
+                        "graph_validating",
+                        f"Graph JSON parsing failed on attempt {attempt}/{MAX_GRAPH_ATTEMPTS}.",
+                    )
+                    yield send(
+                        {
+                            "status": "graph_validating",
+                            "session_id": audit["sessionId"],
+                            "message": f"Graph JSON parsing failed on attempt {attempt}/{MAX_GRAPH_ATTEMPTS}.",
+                            "validation_error": validation_feedback,
+                            "graph_attempts": audit["graphAttempts"],
+                        }
+                    )
+                    continue
 
                 if usage is not None:
                     actual_usages.append(usage)

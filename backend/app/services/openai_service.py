@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import AsyncGenerator, Literal, TypeVar
 import math
 import os
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.services.model_config import AIProvider, get_provider_label
 from app.services.pricing import GenerationTokenUsage, normalize_generation_usage
@@ -19,6 +20,12 @@ load_dotenv()
 ReasoningEffort = Literal["low", "medium", "high"]
 StructuredOutputModel = TypeVar("StructuredOutputModel", bound=BaseModel)
 DEFAULT_ATLAS_BASE_URL = "https://api.atlascloud.ai/v1"
+
+
+class StructuredOutputParseError(ValueError):
+    def __init__(self, message: str, *, raw_text: str) -> None:
+        super().__init__(message)
+        self.raw_text = raw_text
 
 
 class OpenAIService:
@@ -106,11 +113,90 @@ class OpenAIService:
         )
 
     @staticmethod
+    def _coerce_json_text(raw: str) -> str:
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text).strip()
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return text[start : end + 1]
+        return text
+
+    @staticmethod
+    def _extract_message_text(message: object | None) -> str:
+        if message is None:
+            return ""
+
+        parts: list[str] = []
+        content = OpenAIService._extract_chat_completion_text(
+            getattr(message, "content", None)
+        )
+        if content.strip():
+            parts.append(content)
+
+        reasoning = getattr(message, "reasoning_content", None)
+        if isinstance(reasoning, str) and reasoning.strip():
+            parts.append(reasoning)
+
+        return "\n".join(parts).strip()
+
+    @staticmethod
+    def _parse_structured_model(
+        raw_text: str,
+        text_format: type[StructuredOutputModel],
+    ) -> StructuredOutputModel:
+        candidates = [raw_text.strip()]
+        coerced = OpenAIService._coerce_json_text(raw_text)
+        if coerced not in candidates:
+            candidates.append(coerced)
+
+        last_error: Exception | None = None
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                return text_format.model_validate_json(candidate)
+            except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+                last_error = exc
+
+        message = (
+            str(last_error)
+            if last_error is not None
+            else "Structured output parsing returned no parsed payload."
+        )
+        raise StructuredOutputParseError(message, raw_text=raw_text)
+
+    @staticmethod
     def _build_atlas_structured_user_prompt(
         *,
         user_prompt: str,
         text_format: type[StructuredOutputModel],
     ) -> str:
+        if text_format.__name__ == "DiagramGraph":
+            return (
+                f"{user_prompt}\n\n"
+                "CRITICAL: Return valid JSON only. Do not write prose, markdown, or commentary.\n"
+                "The response must start with { and end with }.\n"
+                'Use this exact shape:\n'
+                "{\n"
+                '  "groups": [{"id": "group_id", "label": "Group", "description": null}],\n'
+                '  "nodes": [{"id": "node_id", "label": "Node", "type": "Subsystem", '
+                '"description": null, "groupId": null, "path": null, "shape": null}],\n'
+                '  "edges": [{"from": "source_id", "to": "target_id", "label": null, '
+                '"description": null, "style": null}]\n'
+                "}\n"
+                "Required constraints:\n"
+                '- Always include "groups", "nodes", and "edges".\n'
+                '- Always include every object field. Use null instead of omitting optional fields.\n'
+                '- "shape" must be one of: box, database, queue, document, circle, hexagon, or null.\n'
+                '- "style" must be one of: solid, dashed, or null.\n'
+                '- IDs must match ^[a-z][a-z0-9_]*$.\n'
+                "- Return JSON only with no markdown fences or commentary."
+            )
+
         schema = json.dumps(text_format.model_json_schema(), ensure_ascii=True, indent=2)
         return (
             f"{user_prompt}\n\n"
@@ -381,13 +467,15 @@ class OpenAIService:
                 if not choices:
                     raise ValueError("Structured output parsing returned no parsed payload.")
                 message = getattr(choices[0], "message", None)
-                raw_text = self._extract_chat_completion_text(
-                    getattr(message, "content", None)
-                ).strip()
+                raw_text = self._extract_message_text(message)
                 if not raw_text:
-                    raise ValueError("Structured output parsing returned no parsed payload.")
+                    raise StructuredOutputParseError(
+                        "Structured output parsing returned no parsed payload.",
+                        raw_text="",
+                    )
+                parsed = self._parse_structured_model(raw_text, text_format)
                 return (
-                    text_format.model_validate_json(raw_text),
+                    parsed,
                     raw_text,
                     self._normalize_chat_completion_usage(getattr(response, "usage", None)),
                 )

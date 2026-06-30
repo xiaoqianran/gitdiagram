@@ -86,6 +86,62 @@ function buildMessages(systemPrompt: string, userPrompt: string) {
   ];
 }
 
+function coerceJsonText(raw: string): string {
+  let text = raw.trim();
+  if (text.startsWith("```")) {
+    text = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  }
+
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    return text.slice(start, end + 1);
+  }
+
+  return text;
+}
+
+function extractAtlasMessageText(message: {
+  content?:
+    | string
+    | Array<{ type?: string; text?: string | null }>
+    | null
+    | undefined;
+  reasoning_content?: string | null;
+}): string {
+  const parts: string[] = [];
+  const content = extractChatCompletionText(message.content);
+  if (content.trim()) {
+    parts.push(content);
+  }
+
+  if (typeof message.reasoning_content === "string" && message.reasoning_content.trim()) {
+    parts.push(message.reasoning_content);
+  }
+
+  return parts.join("\n").trim();
+}
+
+function parseStructuredJson<T>(rawText: string, schema: ZodType<T>): T {
+  const candidates = [rawText.trim(), coerceJsonText(rawText)];
+  let lastError: unknown = null;
+
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    try {
+      return schema.parse(JSON.parse(candidate));
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Structured output parsing returned no parsed payload.");
+}
+
 function extractChatCompletionText(
   content:
     | string
@@ -135,7 +191,8 @@ function buildAtlasStructuredOutputPrompt(params: {
     return [
       params.userPrompt,
       "",
-      "Return valid JSON only.",
+      "CRITICAL: Return valid JSON only. Do not write prose, markdown, or commentary.",
+      "The response must start with { and end with }.",
       'Schema name: "diagram_graph".',
       "Use this exact shape:",
       '{',
@@ -461,15 +518,14 @@ export async function generateStructuredOutput<T>({
       signal ? { signal } : undefined,
     );
 
-    const rawText = extractChatCompletionText(
-      response.choices[0]?.message?.content,
-    ).trim();
+    const message = response.choices[0]?.message;
+    const rawText = message ? extractAtlasMessageText(message) : "";
     if (!rawText) {
       throw new Error("Structured output parsing returned no parsed payload.");
     }
 
     return {
-      output: schema.parse(JSON.parse(rawText)),
+      output: parseStructuredJson(rawText, schema),
       rawText,
       usage: normalizeChatCompletionUsage(response.usage),
     };

@@ -562,25 +562,59 @@ export async function POST(request: Request) {
               graph_attempts: audit.graphAttempts,
             });
 
-            const { output: graph, rawText, usage } = await generateStructuredOutput({
-              provider,
-              model,
-              systemPrompt: SYSTEM_GRAPH_PROMPT,
-              userPrompt: toTaggedMessage({
-                explanation,
-                file_tree: githubData.fileTree,
-                repo_owner: username,
-                repo_name: repo,
-                previous_graph: previousGraphRaw,
-                validation_feedback: validationFeedback,
-              }),
-              schema: diagramGraphSchema,
-              schemaName: "diagram_graph",
-              apiKey,
-              reasoningEffort: "low",
-              maxOutputTokens: GRAPH_MAX_OUTPUT_TOKENS,
-              signal: generationAbortController.signal,
-            });
+            let graph;
+            let rawText = "";
+            let usage = null;
+            try {
+              ({ output: graph, rawText, usage } = await generateStructuredOutput({
+                provider,
+                model,
+                systemPrompt: SYSTEM_GRAPH_PROMPT,
+                userPrompt: toTaggedMessage({
+                  explanation,
+                  file_tree: githubData.fileTree,
+                  repo_owner: username,
+                  repo_name: repo,
+                  previous_graph: previousGraphRaw,
+                  validation_feedback: validationFeedback,
+                }),
+                schema: diagramGraphSchema,
+                schemaName: "diagram_graph",
+                apiKey,
+                reasoningEffort: "low",
+                maxOutputTokens: GRAPH_MAX_OUTPUT_TOKENS,
+                signal: generationAbortController.signal,
+              }));
+            } catch (error) {
+              rawText = error instanceof Error ? error.message : String(error);
+              validationFeedback =
+                "Your previous response was not valid JSON for the diagram graph. " +
+                "Return ONLY a JSON object with groups, nodes, and edges. " +
+                "Do not include prose, markdown fences, or commentary. " +
+                `Parser error: ${rawText}`;
+              previousGraphRaw = rawText;
+              audit = withGraphAttempt(audit, {
+                attempt,
+                rawOutput: rawText,
+                graph: null,
+                validationFeedback,
+                status: "failed",
+                createdAt: new Date().toISOString(),
+              });
+              audit = withTimelineEvent(
+                audit,
+                "graph_validating",
+                `Graph JSON parsing failed on attempt ${attempt}/${MAX_GRAPH_ATTEMPTS}.`,
+              );
+              send({
+                status: "graph_validating",
+                session_id: audit.sessionId,
+                message: `Graph JSON parsing failed on attempt ${attempt}/${MAX_GRAPH_ATTEMPTS}.`,
+                validation_error: validationFeedback,
+                graph_attempts: audit.graphAttempts,
+              });
+              continue;
+            }
 
             if (usage) {
               actualUsages.push(usage);
