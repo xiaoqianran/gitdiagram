@@ -1,0 +1,37 @@
+# [Grok] Next.js frontend image for docker-compose full-stack deploy.
+# Build: docker compose build web
+# Run:   docker compose up -d web  (or `docker compose up -d` for all services)
+
+FROM oven/bun:1.3.14 AS deps
+WORKDIR /app
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+FROM oven/bun:1.3.14 AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# NEXT_PUBLIC_* are baked into the client bundle at build time.
+ARG NEXT_PUBLIC_GENERATION_BACKEND=fastapi
+ARG NEXT_PUBLIC_GENERATE_API_BASE_URL=http://localhost:8000/generate
+ENV NEXT_PUBLIC_GENERATION_BACKEND=${NEXT_PUBLIC_GENERATION_BACKEND}
+ENV NEXT_PUBLIC_GENERATE_API_BASE_URL=${NEXT_PUBLIC_GENERATE_API_BASE_URL}
+
+RUN bun run build
+
+FROM oven/bun:1.3.14 AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/bun.lock ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/next.config.js ./
+
+EXPOSE 3000
+CMD ["bun", "start"]

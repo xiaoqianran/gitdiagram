@@ -7,9 +7,26 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 
-import { assertLiveStorageAllowedForTests, readRequiredEnv } from "./config";
+import {
+  assertLiveStorageAllowedForTests,
+  readEnv,
+  readRequiredEnv,
+} from "./config";
 
 let client: S3Client | null = null;
+
+function usesCustomS3Endpoint(): boolean {
+  return Boolean(readEnv("S3_ENDPOINT"));
+}
+
+function getS3Endpoint(): string {
+  const customEndpoint = readEnv("S3_ENDPOINT");
+  if (customEndpoint) {
+    return customEndpoint.replace(/\/$/, "");
+  }
+
+  return `https://${readRequiredEnv("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com`;
+}
 
 function getClient(): S3Client {
   assertLiveStorageAllowedForTests("R2");
@@ -19,8 +36,9 @@ function getClient(): S3Client {
   }
 
   client = new S3Client({
-    region: "auto",
-    endpoint: `https://${readRequiredEnv("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com`,
+    region: usesCustomS3Endpoint() ? "us-east-1" : "auto",
+    endpoint: getS3Endpoint(),
+    forcePathStyle: usesCustomS3Endpoint(),
     credentials: {
       accessKeyId: readRequiredEnv("R2_ACCESS_KEY_ID"),
       secretAccessKey: readRequiredEnv("R2_SECRET_ACCESS_KEY"),

@@ -1,0 +1,9 @@
+# [Grok] Docker build context exclusions for the Next.js web image
+.git
+.github
+node_modules
+.next
+backend
+docs
+*.md
+.env*.local

@@ -1,4 +1,44 @@
+# [Grok] Full-stack compose stack:
+#   web  → Next.js UI       http://localhost:3000
+#   api  → FastAPI backend  http://localhost:8000
+#   minio→ S3 storage       http://localhost:9000 (console :9001)
+
 services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-gitdiagram}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-gitdiagram-secret}
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-gitdiagram}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-gitdiagram-secret}
+      R2_PUBLIC_BUCKET: ${R2_PUBLIC_BUCKET:-gitdiagram-public}
+      R2_PRIVATE_BUCKET: ${R2_PRIVATE_BUCKET:-gitdiagram-private}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do
+        echo 'waiting for minio...';
+        sleep 2;
+      done;
+      mc mb local/$$R2_PUBLIC_BUCKET --ignore-existing;
+      mc mb local/$$R2_PRIVATE_BUCKET --ignore-existing;
+      exit 0;
+      "
+    restart: "no"
+
   api:
     build:
       context: ./backend
@@ -12,9 +52,46 @@ services:
     env_file:
       - .env
     environment:
-      - ENVIRONMENT=${ENVIRONMENT:-development} # Default to development if not set
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - S3_ENDPOINT=http://minio:9000
+    depends_on:
+      minio:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # [Grok] Next.js frontend — browser UI; generation calls the api service.
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_GENERATION_BACKEND: fastapi
+        # Browser reaches API via the host-mapped port, not the docker service name.
+        NEXT_PUBLIC_GENERATE_API_BASE_URL: http://localhost:8000/generate
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+      - NEXT_PUBLIC_GENERATION_BACKEND=fastapi
+      - NEXT_PUBLIC_GENERATE_API_BASE_URL=http://localhost:8000/generate
+      # Server-side reads (repo pages, browse) use the internal MinIO hostname.
+      - S3_ENDPOINT=http://minio:9000
+    depends_on:
+      api:
+        condition: service_started
+      minio:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:
   api-python-venv:
   api-node-modules:
+  minio-data:

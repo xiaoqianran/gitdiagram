@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 import boto3
 import requests
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from app.services.pricing import resolve_pricing_model
 
@@ -143,25 +144,36 @@ class _R2ArtifactStore:
         self._s3_client = None
 
     def is_configured(self) -> bool:
+        has_endpoint = bool(_read_env("S3_ENDPOINT") or self.account_id)
         return bool(
-            self.account_id
+            has_endpoint
             and self.access_key_id
             and self.secret_access_key
             and self.locator.is_configured()
         )
+
+    def _resolve_endpoint(self) -> str:
+        custom_endpoint = _read_env("S3_ENDPOINT")
+        if custom_endpoint:
+            return custom_endpoint.rstrip("/")
+        if not self.account_id:
+            raise ValueError("Missing R2_ACCOUNT_ID.")
+        return f"https://{self.account_id}.r2.cloudflarestorage.com"
 
     def _get_client(self):
         if self._s3_client is not None:
             return self._s3_client
         if not self.is_configured():
             raise ValueError("Missing R2 configuration.")
-        self._s3_client = boto3.client(
-            "s3",
-            endpoint_url=f"https://{self.account_id}.r2.cloudflarestorage.com",
-            aws_access_key_id=self.access_key_id,
-            aws_secret_access_key=self.secret_access_key,
-            region_name="auto",
-        )
+        client_kwargs: dict[str, Any] = {
+            "endpoint_url": self._resolve_endpoint(),
+            "aws_access_key_id": self.access_key_id,
+            "aws_secret_access_key": self.secret_access_key,
+            "region_name": "us-east-1" if _read_env("S3_ENDPOINT") else "auto",
+        }
+        if _read_env("S3_ENDPOINT"):
+            client_kwargs["config"] = Config(s3={"addressing_style": "path"})
+        self._s3_client = boto3.client("s3", **client_kwargs)
         return self._s3_client
 
     def get_json_object(self, bucket: str, key: str) -> dict[str, Any] | None:
