@@ -32,6 +32,12 @@ function getGenerateBasePath() {
     return "/api/generate";
   }
 
+  // [Grok] In the browser, always use same-origin /generate (proxied by next.config.js).
+  // Avoids broken requests when users open the UI via LAN IP instead of localhost.
+  if (typeof window !== "undefined") {
+    return `${window.location.origin}/generate`;
+  }
+
   const apiBaseUrl = process.env.NEXT_PUBLIC_GENERATE_API_BASE_URL?.trim();
   if (!apiBaseUrl) {
     throw new Error(

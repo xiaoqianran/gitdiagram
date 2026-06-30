@@ -70,6 +70,8 @@ services:
         NEXT_PUBLIC_GENERATION_BACKEND: fastapi
         # Browser reaches API via the host-mapped port, not the docker service name.
         NEXT_PUBLIC_GENERATE_API_BASE_URL: http://localhost:8000/generate
+        # [Grok] Baked into next.config.js rewrites during `docker compose build web`.
+        GENERATE_API_PROXY_TARGET: http://api:8000
     ports:
       - "3000:3000"
     env_file:
@@ -80,6 +82,8 @@ services:
       - HOSTNAME=0.0.0.0
       - NEXT_PUBLIC_GENERATION_BACKEND=fastapi
       - NEXT_PUBLIC_GENERATE_API_BASE_URL=http://localhost:8000/generate
+      # [Grok] Next.js rewrites /generate/* to the api container on the docker network.
+      - GENERATE_API_PROXY_TARGET=http://api:8000
       # Server-side reads (repo pages, browse) use the internal MinIO hostname.
       - S3_ENDPOINT=http://minio:9000
     depends_on:
